@@ -1,42 +1,46 @@
-#ifdef ESP_AP_CONNECT
-#define WIFI_SSID "ESP32_wifi"
-#define WIFI_PASSWORD "esp32pass"
-#define OPPONENT_UDP_PORT 5004
-#define SET_IPADDR4(ipAddr) IP_ADDR4((ipAddr), 192, 168, 4, 255);
-#else
-#define WIFI_SSID "WX03_Todoroki"
-#define WIFI_PASSWORD "TodorokiWX03"
-#define OPPONENT_UDP_PORT 4444
-#define SET_IPADDR4(ipAddr) IP_ADDR4((ipAddr), 192, 168, 179, 5);
-#endif
-
 #include "driver/gpio.h"
 #include "esp_event.h"
 #include "esp_event_loop.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_wifi.h"
+#include "freertos/event_groups.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "nvs_flash.h"
+#include <string.h>
+#include <sys/param.h>
 
 #include "stdio.h"
 #include <stdint.h> // Boolean
 #include <stdlib.h>
 #include <string.h>
 
-#include "lwip/dns.h"
 #include "lwip/err.h"
-#include "lwip/ip_addr.h"
-#include "lwip/netdb.h"
 #include "lwip/sockets.h"
 #include "lwip/sys.h"
-#include "lwip/udp.h"
+#include <lwip/netdb.h>
+
+/* defines */
+
+#define WIFI_SSID CONFIG_WIFI_SSID
+#define WIFI_PASS CONFIG_WIFI_PASSWORD
+
+#if defined CONFIG_OPPONENT_IS_IPV4
+#define HOST_IP_ADDR CONFIG_OPPONENT_IPV4_ADDR
+#else
+#define HOST_IP_ADDR CONFIG_OPPONENT_IPV6_ADDR
+#endif
+
+// #define HOST_IP_ADDR CONFIG_OPPONENT_IPV4_ADDR
+#define OPPONENT_UDP_PORT CONFIG_OPPONENT_UDP_PORT
 
 #define UDP_PAYLOAD_SIZE 50
 
 static const char *TAG = "MyModule";
 static const int SSRC_ID = 123456;
 static const int SAMPLE_DATA[24] = {
+    /* 12しか使わんくない？？ */
     -5601769,
     -7388378,
     6516204,
@@ -63,6 +67,52 @@ static const int SAMPLE_DATA[24] = {
     3821064,
 };
 
+/* inlined function for logging udp success/failure */
+// なんか `sendto()` を使用するように変更してから帰ってくるエラー変わった気がする
+// こっちも変えなくては
+inline static void ESP_LOG_UDP_SEND_RESULT(esp_err_t result, unsigned int count)
+{
+  if (result < 0)
+  {
+    ESP_LOGI(TAG, "%d - error code is %d", count, result);
+
+    switch (result)
+    {
+    case -1:
+      ESP_LOGI(TAG, "OUT OF MEMORY");
+      break;
+    case -2:
+      ESP_LOGI(TAG, "BUFFER ERROR");
+      break;
+    case -3:
+      ESP_LOGI(TAG, "TIMEOUT");
+      break;
+    case -4:
+      ESP_LOGI(TAG, "ROUTING PROBLEM");
+      break;
+    case -5:
+      ESP_LOGI(TAG, "IN PROGRESS");
+      break;
+    case -6:
+      ESP_LOGI(TAG, "ILLEGAL VALUE");
+      break;
+    case -7:
+      ESP_LOGI(TAG, "ROUTING PROBLEM");
+      break;
+
+    default:
+      break;
+    }
+  }
+  else
+  {
+    ESP_LOGI(TAG, "SUCCESS with code %d", result);
+  };
+}
+
+/* allocation for AES67 L24 packet */
+static const unsigned int PACKET_DATA_LENGTH = 12 + 3 * 12;
+
 esp_err_t
 event_handler(void *ctx, system_event_t *event)
 {
@@ -85,7 +135,7 @@ void esp32connectToWiFi()
   esp_err_t wifiConnected = ESP_ERR_WIFI_NOT_INIT;
 
   wifi_config_t sta_config = {.sta = {.ssid = WIFI_SSID,
-                                      .password = WIFI_PASSWORD,
+                                      .password = WIFI_PASS,
                                       .bssid_set = false}};
   ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_config));
   ESP_ERROR_CHECK(esp_wifi_start());
@@ -190,22 +240,6 @@ RTP_header create_next_aes67_header(RTP_header *prevHeader)
   return aes67h;
 };
 
-struct pbuf *alloc_AES_header()
-{
-  return pbuf_alloc(
-      PBUF_TRANSPORT,
-      12, // RTP Header struct
-      PBUF_RAM);
-};
-
-struct pbuf *alloc_AES_payload(unsigned int bytes)
-{
-  return pbuf_alloc(
-      PBUF_RAW,
-      bytes, // how many unsigned chars you need, e.g. 3 for 24 bits.
-      PBUF_RAM);
-};
-
 typedef struct _l24_data
 {
   union {
@@ -231,126 +265,106 @@ typedef struct _l16_data
   };
 } __attribute__((packed)) L16Data;
 
+inline static esp_err_t send_udp(int sock, const void *dataptr, size_t datalength, struct sockaddr *destAddr, int destAddrSize)
+{
+  int err = sendto(sock, dataptr, datalength, 0, destAddr, destAddrSize);
+  if (err < 0)
+  {
+    ESP_LOGE(TAG, "Error occurred during sending: errno %d", errno);
+    return err;
+  }
+  ESP_LOGI(TAG, "Message sent");
+  return err;
+}
+
 void app_main(void)
 {
   esp32setup();
-  esp32connectToWiFi();
+  esp32connectToWiFi(); // Taskにすると良さそう
 
   // wait
   vTaskDelay(2000);
 
   unsigned int count = 0;
+  unsigned char *PACKET_DATA = calloc(PACKET_DATA_LENGTH, sizeof(unsigned char));
 
   // UDP inits
-  struct udp_pcb *udp;
-  err_t err, result;
-  ip_addr_t ipAddr;
-  SET_IPADDR4(&ipAddr);
-  udp = udp_new();
-  err = udp_connect(udp, &ipAddr, OPPONENT_UDP_PORT);
+  esp_err_t send_res;
+  char addr_str[128];
+  int addr_family;
+  int ip_protocol;
 
+  RTP_header rtp_header = create_aes67_header(L24);
   L24Data data; // for encoding 24bit audio data to chars
 
-  for (int z = 0; z < 50; z++)
+#ifdef CONFIG_OPPONENT_IS_IPV4
+  struct sockaddr_in destAddr;
+  destAddr.sin_addr.s_addr = inet_addr(HOST_IP_ADDR);
+  destAddr.sin_family = AF_INET;
+  destAddr.sin_port = htons(OPPONENT_UDP_PORT);
+  addr_family = AF_INET;
+  ip_protocol = IPPROTO_IP;
+  inet_ntoa_r(destAddr.sin_addr, addr_str, sizeof(addr_str) - 1);
+#else // IPV6
+  struct sockaddr_in6 destAddr;
+  inet6_aton(HOST_IP_ADDR, &destAddr.sin6_addr);
+  destAddr.sin6_family = AF_INET6;
+  destAddr.sin6_port = htons(OPPONENT_UDP_PORT);
+  addr_family = AF_INET6;
+  ip_protocol = IPPROTO_IPV6;
+  inet6_ntoa_r(destAddr.sin6_addr, addr_str, sizeof(addr_str) - 1);
+#endif
+
+  int sock = socket(addr_family, SOCK_DGRAM, ip_protocol);
+  if (sock < 0)
   {
-    // Alloc pbufs
-    struct pbuf *aes67_header = alloc_AES_header();
-    struct pbuf *aes67_payloads[12] = {
-        // 12 samples
-        alloc_AES_payload(3),
-        alloc_AES_payload(3),
-        alloc_AES_payload(3),
-        alloc_AES_payload(3),
-        alloc_AES_payload(3),
-        alloc_AES_payload(3),
-        alloc_AES_payload(3),
-        alloc_AES_payload(3),
-        alloc_AES_payload(3),
-        alloc_AES_payload(3),
-        alloc_AES_payload(3),
-        alloc_AES_payload(3),
-    };
+    ESP_LOGE(TAG, "Unable to create socket: errno %d", errno);
+  }
+  ESP_LOGI(TAG, "Socket created");
 
-    // place AES67 data in pbuf
-    RTP_header rtp_header = create_aes67_header(L24);
-    pbuf_put_at(aes67_header, 0, rtp_header.a);
-    pbuf_put_at(aes67_header, 1, rtp_header.b);
-    pbuf_put_at(aes67_header, 2, rtp_header.c);
-    pbuf_put_at(aes67_header, 3, rtp_header.d);
-    pbuf_put_at(aes67_header, 4, rtp_header.e);
-    pbuf_put_at(aes67_header, 5, rtp_header.f);
-    pbuf_put_at(aes67_header, 6, rtp_header.g);
-    pbuf_put_at(aes67_header, 7, rtp_header.h);
-    pbuf_put_at(aes67_header, 8, rtp_header.i);
-    pbuf_put_at(aes67_header, 9, rtp_header.j);
-    pbuf_put_at(aes67_header, 10, rtp_header.k);
-    pbuf_put_at(aes67_header, 11, rtp_header.l);
+  // for (int z = 0; z < 50; z++)
+  for (;;)
+  {
+    count++;
+    rtp_header = create_next_aes67_header(&rtp_header);
 
+    /* rewrite PACKET_DATA */
+    PACKET_DATA[0] = rtp_header.a;
+    PACKET_DATA[1] = rtp_header.b;
+    PACKET_DATA[2] = rtp_header.c;
+    PACKET_DATA[3] = rtp_header.d;
+    PACKET_DATA[4] = rtp_header.e;
+    PACKET_DATA[5] = rtp_header.f;
+    PACKET_DATA[6] = rtp_header.g;
+    PACKET_DATA[7] = rtp_header.h;
+    PACKET_DATA[8] = rtp_header.i;
+    PACKET_DATA[9] = rtp_header.j;
+    PACKET_DATA[10] = rtp_header.k;
+    PACKET_DATA[11] = rtp_header.l;
+    //
     for (unsigned char i = 0; i < 12; i++)
     {
       data.whole = SAMPLE_DATA[i];
+      const unsigned int offset = 12; // RTP header
 
-      pbuf_put_at(aes67_payloads[i], 0, data.first);
-      pbuf_put_at(aes67_payloads[i], 1, data.second);
-      pbuf_put_at(aes67_payloads[i], 2, data.third);
+      PACKET_DATA[offset + i * 3 + 0] = data.first;
+      PACKET_DATA[offset + i * 3 + 1] = data.second;
+      PACKET_DATA[offset + i * 3 + 2] = data.third;
     }
-
-    // Chain pbufs from the tail(!)
-    for (short i = 10; i > -1; i--)
-    {
-      pbuf_cat(aes67_payloads[i], aes67_payloads[i + 1]);
-    }
-    pbuf_cat(aes67_header, aes67_payloads[0]);
 
     // Send data
-    result = udp_send(udp, aes67_header);
-    if (result != 0)
-    {
-      ESP_LOGI(TAG, "%d - error code is %d", count, result);
-
-      switch (result)
-      {
-      case -1:
-        ESP_LOGI(TAG, "OUT OF MEMORY");
-        break;
-      case -2:
-        ESP_LOGI(TAG, "BUFFER ERROR");
-        break;
-      case -3:
-        ESP_LOGI(TAG, "TIMEOUT");
-        break;
-      case -4:
-        ESP_LOGI(TAG, "ROUTING PROBLEM");
-        break;
-      case -5:
-        ESP_LOGI(TAG, "IN PROGRESS");
-        break;
-      case -6:
-        ESP_LOGI(TAG, "ILLEGAL VALUE");
-        break;
-      case -7:
-        ESP_LOGI(TAG, "ROUTING PROBLEM");
-        break;
-
-      default:
-        break;
-      }
-    }
-    else
-    {
-      ESP_LOGI(TAG, "SUCCESS");
-    };
+    send_res = send_udp(
+        sock,
+        PACKET_DATA,
+        // strlen(PACKET_DATA),
+        PACKET_DATA_LENGTH,
+        (struct sockaddr *)&destAddr,
+        sizeof(destAddr));
+    ESP_LOG_UDP_SEND_RESULT(send_res, count);
   }
 
-  // // Clean-ups
-  // pbuf_free(aes67_header);
-  // for (unsigned char i = 0; i < 12; i++)
+  // while (true)
   // {
-  //   pbuf_free(aes67_payloads[i]);
-  // }
-
-  while (true)
-  {
-    vTaskDelay(1000);
-  };
+  //   vTaskDelay(1000);
+  // };
 }
