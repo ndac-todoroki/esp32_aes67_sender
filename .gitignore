@@ -1,2 +1,5 @@
 build/
+
+# ignore sdkconfig because a) it contains sensitive info, b) it depends on each chip.
+sdkconfig
 sdkconfig.old
