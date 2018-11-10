@@ -3,8 +3,6 @@
 # project subdirectory.
 #
 
-PROJECT_NAME := app-template
-
-# CFLAGS += -D ESP_AP_CONNECT
+PROJECT_NAME := aes67_sender
 
 include $(IDF_PATH)/make/project.mk
