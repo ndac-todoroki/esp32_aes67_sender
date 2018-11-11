@@ -240,6 +240,13 @@ RTP_header create_next_aes67_header(RTP_header *prevHeader)
   return aes67h;
 };
 
+/* 破壊的に新しいヘッダを作る */
+void renew_aes67_header(RTP_header *header)
+{
+  header->sequence_number++;
+  header->timestamp = microsFromStart();
+};
+
 typedef struct _l24_data
 {
   union {
@@ -265,7 +272,7 @@ typedef struct _l16_data
   };
 } __attribute__((packed)) L16Data;
 
-inline static esp_err_t send_udp(int sock, const void *dataptr, size_t datalength, struct sockaddr *destAddr, int destAddrSize)
+static esp_err_t send_udp(int sock, const void *dataptr, size_t datalength, struct sockaddr *destAddr, int destAddrSize)
 {
   int err = sendto(sock, dataptr, datalength, 0, destAddr, destAddrSize);
   if (err < 0)
@@ -282,6 +289,9 @@ void app_main(void)
   esp32setup();
   esp32connectToWiFi(); // Taskにすると良さそう
 
+  /* Disable logging from now on */
+  esp_log_level_set(TAG, ESP_LOG_NONE);
+
   // wait
   vTaskDelay(2000);
 
@@ -296,6 +306,30 @@ void app_main(void)
 
   RTP_header rtp_header = create_aes67_header(L24);
   L24Data data; // for encoding 24bit audio data to chars
+
+  /* Initialize first packet */
+  PACKET_DATA[0] = rtp_header.a;
+  PACKET_DATA[1] = rtp_header.b;
+  PACKET_DATA[2] = rtp_header.c;
+  PACKET_DATA[3] = rtp_header.d;
+  PACKET_DATA[4] = rtp_header.e;
+  PACKET_DATA[5] = rtp_header.f;
+  PACKET_DATA[6] = rtp_header.g;
+  PACKET_DATA[7] = rtp_header.h;
+  PACKET_DATA[8] = rtp_header.i;
+  PACKET_DATA[9] = rtp_header.j;
+  PACKET_DATA[10] = rtp_header.k;
+  PACKET_DATA[11] = rtp_header.l;
+  //
+  for (unsigned char i = 0; i < 12; i++)
+  {
+    data.whole = SAMPLE_DATA[i];
+    const unsigned int offset = 12; // RTP header
+
+    PACKET_DATA[offset + i * 3 + 0] = data.first;
+    PACKET_DATA[offset + i * 3 + 1] = data.second;
+    PACKET_DATA[offset + i * 3 + 2] = data.third;
+  }
 
 #ifdef CONFIG_OPPONENT_IS_IPV4
   struct sockaddr_in destAddr;
@@ -325,22 +359,41 @@ void app_main(void)
   // for (int z = 0; z < 50; z++)
   for (;;)
   {
-    count++;
-    rtp_header = create_next_aes67_header(&rtp_header);
+    // count++;
+
+    /// Send data
+    // send_res = send_udp(
+    //     sock,
+    //     PACKET_DATA,
+    //     // strlen(PACKET_DATA),
+    //     PACKET_DATA_LENGTH,
+    //     (struct sockaddr *)&destAddr,
+    //     sizeof(destAddr));
+    sendto(
+        sock,
+        PACKET_DATA,
+        PACKET_DATA_LENGTH,
+        0,
+        (struct sockaddr *)&destAddr,
+        sizeof(destAddr));
+    // ESP_LOG_UDP_SEND_RESULT(send_res, count);
+
+    renew_aes67_header(&rtp_header);
+    // rtp_header = create_next_aes67_header(&rtp_header); // メモリあろケート的に不利？
 
     /* rewrite PACKET_DATA */
-    PACKET_DATA[0] = rtp_header.a;
-    PACKET_DATA[1] = rtp_header.b;
-    PACKET_DATA[2] = rtp_header.c;
+    // PACKET_DATA[0] = rtp_header.a;
+    // PACKET_DATA[1] = rtp_header.b;
+    PACKET_DATA[2] = rtp_header.c; // change only the sequence numbers
     PACKET_DATA[3] = rtp_header.d;
-    PACKET_DATA[4] = rtp_header.e;
+    PACKET_DATA[4] = rtp_header.e; // and the timestamps
     PACKET_DATA[5] = rtp_header.f;
     PACKET_DATA[6] = rtp_header.g;
     PACKET_DATA[7] = rtp_header.h;
-    PACKET_DATA[8] = rtp_header.i;
-    PACKET_DATA[9] = rtp_header.j;
-    PACKET_DATA[10] = rtp_header.k;
-    PACKET_DATA[11] = rtp_header.l;
+    // PACKET_DATA[8] = rtp_header.i;
+    // PACKET_DATA[9] = rtp_header.j;
+    // PACKET_DATA[10] = rtp_header.k;
+    // PACKET_DATA[11] = rtp_header.l;
     //
     for (unsigned char i = 0; i < 12; i++)
     {
@@ -351,20 +404,5 @@ void app_main(void)
       PACKET_DATA[offset + i * 3 + 1] = data.second;
       PACKET_DATA[offset + i * 3 + 2] = data.third;
     }
-
-    // Send data
-    send_res = send_udp(
-        sock,
-        PACKET_DATA,
-        // strlen(PACKET_DATA),
-        PACKET_DATA_LENGTH,
-        (struct sockaddr *)&destAddr,
-        sizeof(destAddr));
-    ESP_LOG_UDP_SEND_RESULT(send_res, count);
   }
-
-  // while (true)
-  // {
-  //   vTaskDelay(1000);
-  // };
 }
