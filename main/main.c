@@ -49,54 +49,18 @@ static const unsigned int PACKET_DATA_LENGTH = RTP_HEADER_BYTES + BYTES_PER_SAMP
 static const char *TAG = "MyModule";
 static const int SSRC_ID = 123456;
 
-/* inlined function for logging udp success/failure */
-// なんか `sendto()` を使用するように変更してから帰ってくるエラー変わった気がする
-// こっちも変えなくては
-inline static void ESP_LOG_UDP_SEND_RESULT(esp_err_t result, unsigned int count)
-{
-  if (result < 0)
-  {
-    ESP_LOGI(TAG, "%d - error code is %d", count, result);
-
-    switch (result)
-    {
-    case -1:
-      ESP_LOGI(TAG, "OUT OF MEMORY");
-      break;
-    case -2:
-      ESP_LOGI(TAG, "BUFFER ERROR");
-      break;
-    case -3:
-      ESP_LOGI(TAG, "TIMEOUT");
-      break;
-    case -4:
-      ESP_LOGI(TAG, "ROUTING PROBLEM");
-      break;
-    case -5:
-      ESP_LOGI(TAG, "IN PROGRESS");
-      break;
-    case -6:
-      ESP_LOGI(TAG, "ILLEGAL VALUE");
-      break;
-    case -7:
-      ESP_LOGI(TAG, "ROUTING PROBLEM");
-      break;
-
-    default:
-      break;
-    }
-  }
-  else
-  {
-    ESP_LOGI(TAG, "SUCCESS with code %d", result);
-  };
-}
-
+/**
+ * Event handler callback function for lwIP.
+ */
 esp_err_t
 event_handler(void *ctx, system_event_t *event)
 {
   return ESP_OK;
 }
+
+/**
+ * Setup functions
+ */
 
 void esp32setup()
 {
