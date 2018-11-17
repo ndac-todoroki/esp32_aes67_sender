@@ -32,10 +32,13 @@
 #define HOST_IP_ADDR CONFIG_OPPONENT_IPV6_ADDR
 #endif
 
-// #define HOST_IP_ADDR CONFIG_OPPONENT_IPV4_ADDR
 #define OPPONENT_UDP_PORT CONFIG_OPPONENT_UDP_PORT
 
-#define UDP_PAYLOAD_SIZE 50
+#define RTP_HEADER_BYTES 12
+#define BYTES_PER_SAMPLE 3
+#define SAMPLES_PER_PACKET 48
+
+static const unsigned int PACKET_DATA_LENGTH = RTP_HEADER_BYTES + BYTES_PER_SAMPLE * SAMPLES_PER_PACKET;
 
 static const char *TAG = "MyModule";
 static const int SSRC_ID = 123456;
@@ -109,9 +112,6 @@ inline static void ESP_LOG_UDP_SEND_RESULT(esp_err_t result, unsigned int count)
     ESP_LOGI(TAG, "SUCCESS with code %d", result);
   };
 }
-
-/* allocation for AES67 L24 packet */
-static const unsigned int PACKET_DATA_LENGTH = 12 + 3 * 12;
 
 esp_err_t
 event_handler(void *ctx, system_event_t *event)
@@ -295,7 +295,6 @@ void app_main(void)
   // wait
   vTaskDelay(2000);
 
-  unsigned int count = 0;
   unsigned char *PACKET_DATA = calloc(PACKET_DATA_LENGTH, sizeof(unsigned char));
 
   // UDP inits
@@ -321,9 +320,9 @@ void app_main(void)
   PACKET_DATA[10] = rtp_header.k;
   PACKET_DATA[11] = rtp_header.l;
   //
-  for (unsigned char i = 0; i < 12; i++)
+  for (int i = 0; i < SAMPLES_PER_PACKET; i++)
   {
-    data.whole = SAMPLE_DATA[i];
+    data.whole = SAMPLE_DATA[i % 24];
     const unsigned int offset = 12; // RTP header
 
     PACKET_DATA[offset + i * 3 + 0] = data.first;
@@ -356,19 +355,8 @@ void app_main(void)
   }
   ESP_LOGI(TAG, "Socket created");
 
-  // for (int z = 0; z < 50; z++)
   for (;;)
   {
-    // count++;
-
-    /// Send data
-    // send_res = send_udp(
-    //     sock,
-    //     PACKET_DATA,
-    //     // strlen(PACKET_DATA),
-    //     PACKET_DATA_LENGTH,
-    //     (struct sockaddr *)&destAddr,
-    //     sizeof(destAddr));
     sendto(
         sock,
         PACKET_DATA,
@@ -395,9 +383,9 @@ void app_main(void)
     // PACKET_DATA[10] = rtp_header.k;
     // PACKET_DATA[11] = rtp_header.l;
     //
-    for (unsigned char i = 0; i < 12; i++)
+    for (unsigned char i = 0; i < SAMPLES_PER_PACKET; i++)
     {
-      data.whole = SAMPLE_DATA[i];
+      data.whole = SAMPLE_DATA[i % 24];
       const unsigned int offset = 12; // RTP header
 
       PACKET_DATA[offset + i * 3 + 0] = data.first;
