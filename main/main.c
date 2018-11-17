@@ -1,12 +1,14 @@
+#include "freertos/FreeRTOS.h"
+#include "freertos/event_groups.h"
+#include "freertos/task.h"
+
 #include "driver/gpio.h"
+#include "driver/i2s.h"
 #include "esp_event.h"
 #include "esp_event_loop.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_wifi.h"
-#include "freertos/event_groups.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 #include "nvs_flash.h"
 #include <string.h>
 #include <sys/param.h>
@@ -36,39 +38,16 @@
 
 #define RTP_HEADER_BYTES 12
 #define BYTES_PER_SAMPLE 3
+#define BITS_PER_SAMPLE (BYTES_PER_SAMPLE * 8)
 #define SAMPLES_PER_PACKET 48
+
+#define SAMPLE_RATE (48000)
+#define I2S_NUM (0)
 
 static const unsigned int PACKET_DATA_LENGTH = RTP_HEADER_BYTES + BYTES_PER_SAMPLE * SAMPLES_PER_PACKET;
 
 static const char *TAG = "MyModule";
 static const int SSRC_ID = 123456;
-static const int SAMPLE_DATA[24] = {
-    /* 12しか使わんくない？？ */
-    -5601769,
-    -7388378,
-    6516204,
-    6315093,
-    3295605,
-    -195466,
-    6121253,
-    2347758,
-    -749841,
-    -5233408,
-    8168938,
-    -2977557,
-    6219119,
-    72656,
-    -2332890,
-    4057447,
-    8209684,
-    -1015844,
-    -2515686,
-    -2618522,
-    -4799178,
-    464494,
-    -2445642,
-    3821064,
-};
 
 /* inlined function for logging udp success/failure */
 // なんか `sendto()` を使用するように変更してから帰ってくるエラー変わった気がする
@@ -132,7 +111,7 @@ void esp32setup()
 
 void esp32connectToWiFi()
 {
-  esp_err_t wifiConnected = ESP_ERR_WIFI_NOT_INIT;
+  esp_err_t wifiConnected = 1; // ESP_ERR_WIFI_NOT_INIT;
 
   wifi_config_t sta_config = {.sta = {.ssid = WIFI_SSID,
                                       .password = WIFI_PASS,
@@ -141,23 +120,50 @@ void esp32connectToWiFi()
   ESP_ERROR_CHECK(esp_wifi_start());
   ESP_ERROR_CHECK(esp_wifi_connect());
 
-  ESP_LOGI(TAG, "Connecting to wifi: %s", WIFI_SSID);
-
   // wait until wifi connects
-  while (wifiConnected != ESP_OK)
+  do
   {
-    ESP_LOGI(TAG, "wifi connect is %d", wifiConnected);
     wifiConnected = esp_wifi_connect();
+    ESP_LOGI(TAG, "wifi connect is %d", wifiConnected);
     vTaskDelay(1000 / portTICK_PERIOD_MS);
-  };
+  } while (wifiConnected != ESP_OK);
 
-  ESP_LOGI(TAG, "wifi connect is %d", wifiConnected);
   ESP_LOGI(TAG, "-> Connected to: %s", WIFI_SSID);
 
   vTaskDelay(3000 / portTICK_PERIOD_MS); // 終わるまで待つ
 }
 
+void esp32_i2s_setup()
+{
+  i2s_config_t i2s_config = {
+      .mode = I2S_MODE_MASTER | I2S_MODE_RX, // Only RX
+      .sample_rate = SAMPLE_RATE,
+      .bits_per_sample = 24,
+      .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT, // 1 channel, mono
+      .communication_format = I2S_COMM_FORMAT_I2S | I2S_COMM_FORMAT_PCM,
+      .dma_buf_count = 6,
+      .dma_buf_len = 48,
+      .use_apll = false,
+      .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1 //Interrupt level 1
+  };
+  i2s_pin_config_t pin_config = {
+      .bck_io_num = 33,
+      .data_in_num = 25,
+      .ws_io_num = 26,
+      .data_out_num = -1 //Not used
+  };
+
+  esp_err_t driver_res = i2s_driver_install(I2S_NUM, &i2s_config, 0, NULL);
+  esp_err_t pin_res = i2s_set_pin(I2S_NUM, &pin_config);
+
+  ESP_LOGI(TAG, "i2s DRIVER: %d, PIN: %d", driver_res, pin_res);
+}
+
 unsigned int microsFromStart() { return (unsigned int)esp_timer_get_time(); }
+
+/**
+ * AES67, RTP関連 
+ */
 
 typedef struct _RTP_header
 {
@@ -284,10 +290,15 @@ static esp_err_t send_udp(int sock, const void *dataptr, size_t datalength, stru
   return err;
 }
 
+/* 
+ * MAIN関数
+ */
+
 void app_main(void)
 {
   esp32setup();
   esp32connectToWiFi(); // Taskにすると良さそう
+  esp32_i2s_setup();
 
   /* Disable logging from now on */
   esp_log_level_set(TAG, ESP_LOG_NONE);
@@ -296,6 +307,8 @@ void app_main(void)
   vTaskDelay(2000);
 
   unsigned char *PACKET_DATA = calloc(PACKET_DATA_LENGTH, sizeof(unsigned char));
+  unsigned char *DMA_READOUT = calloc(BYTES_PER_SAMPLE * SAMPLES_PER_PACKET, sizeof(unsigned char));
+  size_t i2s_bytes_read = 0;
 
   // UDP inits
   esp_err_t send_res;
@@ -319,16 +332,6 @@ void app_main(void)
   PACKET_DATA[9] = rtp_header.j;
   PACKET_DATA[10] = rtp_header.k;
   PACKET_DATA[11] = rtp_header.l;
-  //
-  for (int i = 0; i < SAMPLES_PER_PACKET; i++)
-  {
-    data.whole = SAMPLE_DATA[i % 24];
-    const unsigned int offset = 12; // RTP header
-
-    PACKET_DATA[offset + i * 3 + 0] = data.first;
-    PACKET_DATA[offset + i * 3 + 1] = data.second;
-    PACKET_DATA[offset + i * 3 + 2] = data.third;
-  }
 
 #ifdef CONFIG_OPPONENT_IS_IPV4
   struct sockaddr_in destAddr;
@@ -357,14 +360,7 @@ void app_main(void)
 
   for (;;)
   {
-    sendto(
-        sock,
-        PACKET_DATA,
-        PACKET_DATA_LENGTH,
-        0,
-        (struct sockaddr *)&destAddr,
-        sizeof(destAddr));
-    // ESP_LOG_UDP_SEND_RESULT(send_res, count);
+    i2s_read(I2S_NUM, DMA_READOUT, (BYTES_PER_SAMPLE * SAMPLES_PER_PACKET), &i2s_bytes_read, 1000); // portMAX_DELAY);
 
     renew_aes67_header(&rtp_header);
     // rtp_header = create_next_aes67_header(&rtp_header); // メモリあろケート的に不利？
@@ -385,12 +381,21 @@ void app_main(void)
     //
     for (unsigned char i = 0; i < SAMPLES_PER_PACKET; i++)
     {
-      data.whole = SAMPLE_DATA[i % 24];
-      const unsigned int offset = 12; // RTP header
+      data.whole = DMA_READOUT[i];
+      const unsigned int offset = RTP_HEADER_BYTES;
 
       PACKET_DATA[offset + i * 3 + 0] = data.first;
       PACKET_DATA[offset + i * 3 + 1] = data.second;
       PACKET_DATA[offset + i * 3 + 2] = data.third;
     }
+
+    sendto(
+        sock,
+        PACKET_DATA,
+        PACKET_DATA_LENGTH,
+        0,
+        (struct sockaddr *)&destAddr,
+        sizeof(destAddr));
+    // ESP_LOG_UDP_SEND_RESULT(send_res, count);
   }
 }
