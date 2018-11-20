@@ -94,7 +94,7 @@ void esp32connectToWiFi()
 
   ESP_LOGI(TAG, "-> Connected to: %s", WIFI_SSID);
 
-  vTaskDelay(3000 / portTICK_PERIOD_MS); // 終わるまで待つ
+  // vTaskDelay(3000 / portTICK_PERIOD_MS); // 終わるまで待つ
 }
 
 void esp32_i2s_setup()
@@ -104,17 +104,17 @@ void esp32_i2s_setup()
       .sample_rate = SAMPLE_RATE,
       .bits_per_sample = 24,
       .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT, // 1 channel, mono
-      .communication_format = I2S_COMM_FORMAT_I2S | I2S_COMM_FORMAT_PCM,
-      .dma_buf_count = 6,
+      .communication_format = I2S_COMM_FORMAT_I2S_MSB,
+      .dma_buf_count = 30,
       .dma_buf_len = 48,
-      .use_apll = false,
+      .use_apll = true,
       .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1 //Interrupt level 1
   };
   i2s_pin_config_t pin_config = {
-      .bck_io_num = 33,
-      .data_in_num = 25,
-      .ws_io_num = 26,
-      .data_out_num = -1 //Not used
+      .bck_io_num = GPIO_NUM_17,
+      .ws_io_num = GPIO_NUM_18,
+      .data_in_num = GPIO_NUM_5,
+      .data_out_num = I2S_PIN_NO_CHANGE // not used
   };
 
   esp_err_t driver_res = i2s_driver_install(I2S_NUM, &i2s_config, 0, NULL);
@@ -217,31 +217,6 @@ void renew_aes67_header(RTP_header *header)
   header->timestamp = microsFromStart();
 };
 
-typedef struct _l24_data
-{
-  union {
-    struct
-    {
-      unsigned char third;
-      unsigned char second;
-      unsigned char first;
-    };
-    unsigned int whole : 24;
-  };
-} __attribute__((packed)) L24Data;
-
-typedef struct _l16_data
-{
-  union {
-    struct
-    {
-      unsigned char second;
-      unsigned char first;
-    };
-    unsigned short whole : 16;
-  };
-} __attribute__((packed)) L16Data;
-
 static esp_err_t send_udp(int sock, const void *dataptr, size_t datalength, struct sockaddr *destAddr, int destAddrSize)
 {
   int err = sendto(sock, dataptr, datalength, 0, destAddr, destAddrSize);
@@ -268,10 +243,10 @@ void app_main(void)
   esp_log_level_set(TAG, ESP_LOG_NONE);
 
   // wait
-  vTaskDelay(2000);
+  // vTaskDelay(2000);
 
-  unsigned char *PACKET_DATA = calloc(PACKET_DATA_LENGTH, sizeof(unsigned char));
-  unsigned char *DMA_READOUT = calloc(BYTES_PER_SAMPLE * SAMPLES_PER_PACKET, sizeof(unsigned char));
+  unsigned char *PACKET_DATA = (unsigned char *)calloc(PACKET_DATA_LENGTH, sizeof(unsigned char));
+  unsigned char *DMA_READOUT = (unsigned char *)calloc(SAMPLES_PER_PACKET * 4, sizeof(unsigned char));
   size_t i2s_bytes_read = 0;
 
   // UDP inits
@@ -281,9 +256,9 @@ void app_main(void)
   int ip_protocol;
 
   RTP_header rtp_header = create_aes67_header(L24);
-  L24Data data; // for encoding 24bit audio data to chars
+  uint32_t mic24_value = 0;
 
-  /* Initialize first packet */
+  /* Initialize first packet header */
   PACKET_DATA[0] = rtp_header.a;
   PACKET_DATA[1] = rtp_header.b;
   PACKET_DATA[2] = rtp_header.c;
@@ -324,10 +299,9 @@ void app_main(void)
 
   for (;;)
   {
-    i2s_read(I2S_NUM, DMA_READOUT, (BYTES_PER_SAMPLE * SAMPLES_PER_PACKET), &i2s_bytes_read, 1000); // portMAX_DELAY);
+    i2s_read(I2S_NUM, DMA_READOUT, (SAMPLES_PER_PACKET * 4), &i2s_bytes_read, portMAX_DELAY);
 
     renew_aes67_header(&rtp_header);
-    // rtp_header = create_next_aes67_header(&rtp_header); // メモリあろケート的に不利？
 
     /* rewrite PACKET_DATA */
     // PACKET_DATA[0] = rtp_header.a;
@@ -343,23 +317,27 @@ void app_main(void)
     // PACKET_DATA[10] = rtp_header.k;
     // PACKET_DATA[11] = rtp_header.l;
     //
-    for (unsigned char i = 0; i < SAMPLES_PER_PACKET; i++)
+    int base_i;
+    const unsigned int offset = RTP_HEADER_BYTES;
+    for (int i = 0; i < SAMPLES_PER_PACKET; i++)
     {
-      data.whole = DMA_READOUT[i];
-      const unsigned int offset = RTP_HEADER_BYTES;
+      mic24_value = (((DMA_READOUT[i * 4 + 3] & 0xff) << 17) |
+                     ((DMA_READOUT[i * 4 + 2] & 0xff) << 9) |
+                     ((DMA_READOUT[i * 4 + 1] & 0xff) << 1) |
+                     ((DMA_READOUT[i * 4 + 0] & 0xff) >> 7)) &
+                    0x00ffffff;
 
-      PACKET_DATA[offset + i * 3 + 0] = data.first;
-      PACKET_DATA[offset + i * 3 + 1] = data.second;
-      PACKET_DATA[offset + i * 3 + 2] = data.third;
+      PACKET_DATA[offset + i * 3 + 0] = (mic24_value >> 16) & 0xff; // real_data.third;
+      PACKET_DATA[offset + i * 3 + 1] = (mic24_value >> 8) & 0xff;  // real_data.second;
+      PACKET_DATA[offset + i * 3 + 2] = (mic24_value >> 0) & 0xff;  // real_data.first;
     }
 
-    sendto(
+    send_res = sendto(
         sock,
         PACKET_DATA,
         PACKET_DATA_LENGTH,
         0,
         (struct sockaddr *)&destAddr,
         sizeof(destAddr));
-    // ESP_LOG_UDP_SEND_RESULT(send_res, count);
   }
 }
