@@ -327,9 +327,9 @@ void app_main(void)
                      ((DMA_READOUT[i * 4 + 0] & 0xff) >> 7)) &
                     0x00ffffff;
 
-      PACKET_DATA[offset + i * 3 + 0] = (mic24_value >> 16) & 0xff; // real_data.third;
-      PACKET_DATA[offset + i * 3 + 1] = (mic24_value >> 8) & 0xff;  // real_data.second;
-      PACKET_DATA[offset + i * 3 + 2] = (mic24_value >> 0) & 0xff;  // real_data.first;
+      PACKET_DATA[offset + i * 3 + 0] = (mic24_value >> 16) & 0xff;
+      PACKET_DATA[offset + i * 3 + 1] = (mic24_value >> 8) & 0xff;
+      PACKET_DATA[offset + i * 3 + 2] = (mic24_value >> 0) & 0xff;
     }
 
     send_res = sendto(
