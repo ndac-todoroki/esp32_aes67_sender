@@ -111,9 +111,9 @@ void esp32_i2s_setup()
       .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1 //Interrupt level 1
   };
   i2s_pin_config_t pin_config = {
-      .bck_io_num = GPIO_NUM_17,
-      .ws_io_num = GPIO_NUM_18,
-      .data_in_num = GPIO_NUM_5,
+      .bck_io_num = GPIO_NUM_18,
+      .ws_io_num = GPIO_NUM_22,
+      .data_in_num = GPIO_NUM_23,
       .data_out_num = I2S_PIN_NO_CHANGE // not used
   };
 
@@ -245,8 +245,8 @@ void app_main(void)
   // wait
   // vTaskDelay(2000);
 
-  unsigned char *PACKET_DATA = (unsigned char *)calloc(PACKET_DATA_LENGTH, sizeof(unsigned char));
-  unsigned char *DMA_READOUT = (unsigned char *)calloc(SAMPLES_PER_PACKET * 4, sizeof(unsigned char));
+  unsigned char *packet_data = (unsigned char *)calloc(PACKET_DATA_LENGTH, sizeof(unsigned char));
+  unsigned char *dma_readout = (unsigned char *)calloc(SAMPLES_PER_PACKET * 4, sizeof(unsigned char));
   size_t i2s_bytes_read = 0;
 
   // UDP inits
@@ -259,18 +259,18 @@ void app_main(void)
   uint32_t mic24_value = 0;
 
   /* Initialize first packet header */
-  PACKET_DATA[0] = rtp_header.a;
-  PACKET_DATA[1] = rtp_header.b;
-  PACKET_DATA[2] = rtp_header.c;
-  PACKET_DATA[3] = rtp_header.d;
-  PACKET_DATA[4] = rtp_header.e;
-  PACKET_DATA[5] = rtp_header.f;
-  PACKET_DATA[6] = rtp_header.g;
-  PACKET_DATA[7] = rtp_header.h;
-  PACKET_DATA[8] = rtp_header.i;
-  PACKET_DATA[9] = rtp_header.j;
-  PACKET_DATA[10] = rtp_header.k;
-  PACKET_DATA[11] = rtp_header.l;
+  packet_data[0] = rtp_header.a;
+  packet_data[1] = rtp_header.b;
+  packet_data[2] = rtp_header.c;
+  packet_data[3] = rtp_header.d;
+  packet_data[4] = rtp_header.e;
+  packet_data[5] = rtp_header.f;
+  packet_data[6] = rtp_header.g;
+  packet_data[7] = rtp_header.h;
+  packet_data[8] = rtp_header.i;
+  packet_data[9] = rtp_header.j;
+  packet_data[10] = rtp_header.k;
+  packet_data[11] = rtp_header.l;
 
 #ifdef CONFIG_OPPONENT_IS_IPV4
   struct sockaddr_in destAddr;
@@ -299,42 +299,42 @@ void app_main(void)
 
   for (;;)
   {
-    i2s_read(I2S_NUM, DMA_READOUT, (SAMPLES_PER_PACKET * 4), &i2s_bytes_read, portMAX_DELAY);
+    i2s_read(I2S_NUM, dma_readout, (SAMPLES_PER_PACKET * 4), &i2s_bytes_read, portMAX_DELAY);
 
     renew_aes67_header(&rtp_header);
 
-    /* rewrite PACKET_DATA */
-    // PACKET_DATA[0] = rtp_header.a;
-    // PACKET_DATA[1] = rtp_header.b;
-    PACKET_DATA[2] = rtp_header.c; // change only the sequence numbers
-    PACKET_DATA[3] = rtp_header.d;
-    PACKET_DATA[4] = rtp_header.e; // and the timestamps
-    PACKET_DATA[5] = rtp_header.f;
-    PACKET_DATA[6] = rtp_header.g;
-    PACKET_DATA[7] = rtp_header.h;
-    // PACKET_DATA[8] = rtp_header.i;
-    // PACKET_DATA[9] = rtp_header.j;
-    // PACKET_DATA[10] = rtp_header.k;
-    // PACKET_DATA[11] = rtp_header.l;
+    /* rewrite packet_data */
+    // packet_data[0] = rtp_header.a;
+    // packet_data[1] = rtp_header.b;
+    packet_data[2] = rtp_header.c; // change only the sequence numbers
+    packet_data[3] = rtp_header.d;
+    packet_data[4] = rtp_header.e; // and the timestamps
+    packet_data[5] = rtp_header.f;
+    packet_data[6] = rtp_header.g;
+    packet_data[7] = rtp_header.h;
+    // packet_data[8] = rtp_header.i;
+    // packet_data[9] = rtp_header.j;
+    // packet_data[10] = rtp_header.k;
+    // packet_data[11] = rtp_header.l;
     //
     int base_i;
     const unsigned int offset = RTP_HEADER_BYTES;
     for (int i = 0; i < SAMPLES_PER_PACKET; i++)
     {
-      mic24_value = (((DMA_READOUT[i * 4 + 3] & 0xff) << 17) |
-                     ((DMA_READOUT[i * 4 + 2] & 0xff) << 9) |
-                     ((DMA_READOUT[i * 4 + 1] & 0xff) << 1) |
-                     ((DMA_READOUT[i * 4 + 0] & 0xff) >> 7)) &
+      mic24_value = (((dma_readout[i * 4 + 3] & 0xff) << 17) |
+                     ((dma_readout[i * 4 + 2] & 0xff) << 9) |
+                     ((dma_readout[i * 4 + 1] & 0xff) << 1) |
+                     ((dma_readout[i * 4 + 0] & 0xff) >> 7)) &
                     0x00ffffff;
 
-      PACKET_DATA[offset + i * 3 + 0] = (mic24_value >> 16) & 0xff;
-      PACKET_DATA[offset + i * 3 + 1] = (mic24_value >> 8) & 0xff;
-      PACKET_DATA[offset + i * 3 + 2] = (mic24_value >> 0) & 0xff;
+      packet_data[offset + i * 3 + 0] = (mic24_value >> 16) & 0xff;
+      packet_data[offset + i * 3 + 1] = (mic24_value >> 8) & 0xff;
+      packet_data[offset + i * 3 + 2] = (mic24_value >> 0) & 0xff;
     }
 
     send_res = sendto(
         sock,
-        PACKET_DATA,
+        packet_data,
         PACKET_DATA_LENGTH,
         0,
         (struct sockaddr *)&destAddr,
