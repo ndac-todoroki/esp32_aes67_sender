@@ -44,10 +44,18 @@
 #define SAMPLE_RATE (48000)
 #define I2S_NUM (0)
 
-static const unsigned int PACKET_DATA_LENGTH = RTP_HEADER_BYTES + BYTES_PER_SAMPLE * SAMPLES_PER_PACKET;
+#define READ_CORE 1
+#define SEND_CORE 0
 
 static const char *TAG = "MyModule";
+
+static const unsigned int PACKET_DATA_LENGTH = RTP_HEADER_BYTES + BYTES_PER_SAMPLE * SAMPLES_PER_PACKET;
 static const int SSRC_ID = 123456;
+
+// Ringbuffer
+static const int RINGBUFFER_SIZE = 2 << 8;
+static int RB_WROTE_AT = 0;
+static int RB_READ_AT = 0;
 
 /**
  * Event handler callback function for lwIP.
@@ -229,6 +237,89 @@ static esp_err_t send_udp(int sock, const void *dataptr, size_t datalength, stru
   return err;
 }
 
+/**
+ * Tasks
+ */
+
+typedef struct _writeToRingbufferTaskParams
+{
+  unsigned char *dma_readout;
+  RTP_header *rtp_header;
+  unsigned char **packet_data_buffer;
+} WriteToRingbufferTaskParams;
+
+void writeToRingbufferTask(WriteToRingbufferTaskParams *pvParameters)
+{
+  size_t i2s_bytes_read = 0;
+  uint32_t mic24_value = 0;
+  const unsigned int offset = RTP_HEADER_BYTES;
+
+  while (true)
+  {
+    int next_write_pos = (RB_WROTE_AT + 1) < RINGBUFFER_SIZE ? RB_WROTE_AT + 1 : 0;
+
+    i2s_read(I2S_NUM, pvParameters->dma_readout, (SAMPLES_PER_PACKET * 4), &i2s_bytes_read, portMAX_DELAY);
+    ESP_LOGI(TAG, "read %d: %d", next_write_pos, microsFromStart());
+
+    renew_aes67_header(pvParameters->rtp_header);
+
+    /* rewrite packet_data */
+    pvParameters->packet_data_buffer[next_write_pos][2] = pvParameters->rtp_header->c; // change only the sequence numbers
+    pvParameters->packet_data_buffer[next_write_pos][3] = pvParameters->rtp_header->d;
+    pvParameters->packet_data_buffer[next_write_pos][4] = pvParameters->rtp_header->e; // and the timestamps
+    pvParameters->packet_data_buffer[next_write_pos][5] = pvParameters->rtp_header->f;
+    pvParameters->packet_data_buffer[next_write_pos][6] = pvParameters->rtp_header->g;
+    pvParameters->packet_data_buffer[next_write_pos][7] = pvParameters->rtp_header->h;
+    //
+    for (int i = 0; i < SAMPLES_PER_PACKET; i++)
+    {
+      mic24_value = (((pvParameters->dma_readout[i * 4 + 3] & 0xff) << 17) |
+                     ((pvParameters->dma_readout[i * 4 + 2] & 0xff) << 9) |
+                     ((pvParameters->dma_readout[i * 4 + 1] & 0xff) << 1) |
+                     ((pvParameters->dma_readout[i * 4 + 0] & 0xff) >> 7)) &
+                    0x00ffffff;
+
+      pvParameters->packet_data_buffer[next_write_pos][offset + i * 3 + 0] = (mic24_value >> 16) & 0xff;
+      pvParameters->packet_data_buffer[next_write_pos][offset + i * 3 + 1] = (mic24_value >> 8) & 0xff;
+      pvParameters->packet_data_buffer[next_write_pos][offset + i * 3 + 2] = (mic24_value >> 0) & 0xff;
+    }
+
+    RB_WROTE_AT = next_write_pos; // 書き終わってからインクリメント
+  }
+}
+
+typedef struct _readRingbufferAndSendPacketTaskParams
+{
+  int sock;
+  unsigned char **packet_data_buffer;
+  struct sockaddr_in *destAddr;
+  int destAddrSize;
+} ReadRingbufferAndSendPacketTaskParams;
+
+void readRingbufferAndSendPacketTask(ReadRingbufferAndSendPacketTaskParams *pvParameters)
+{
+  while (true)
+  {
+    ESP_LOGI(TAG, "RB_WROTE_AT %d RB_READ_AT %d", RB_WROTE_AT, RB_READ_AT);
+    if (RB_WROTE_AT != RB_READ_AT)
+    {
+      ESP_LOGI(TAG, "RB_WROTE_AT != RB_READ_AT");
+      ESP_LOGI(TAG, "size %d", pvParameters->destAddr->sin_family);
+
+      int next_read_pos = (RB_READ_AT + 1) < RINGBUFFER_SIZE ? RB_READ_AT + 1 : 0;
+      RB_READ_AT = next_read_pos;
+
+      sendto(
+          pvParameters->sock,
+          pvParameters->packet_data_buffer[RB_READ_AT],
+          PACKET_DATA_LENGTH,
+          0,
+          (struct sockaddr *)pvParameters->destAddr,
+          pvParameters->destAddrSize);
+    }
+  }
+}
+
 /* 
  * MAIN関数
  */
@@ -245,32 +336,39 @@ void app_main(void)
   // wait
   // vTaskDelay(2000);
 
-  unsigned char *packet_data = (unsigned char *)calloc(PACKET_DATA_LENGTH, sizeof(unsigned char));
+  // Ring Buffer for packet data
+  RTP_header rtp_header = create_aes67_header(L24);
+  unsigned char *packet_data_buffer[RINGBUFFER_SIZE];
+  for (size_t i = 0; i < RINGBUFFER_SIZE; i++)
+  {
+    packet_data_buffer[i] = (unsigned char *)calloc(PACKET_DATA_LENGTH, sizeof(unsigned char));
+  }
+
+  // I2S and DMA
   unsigned char *dma_readout = (unsigned char *)calloc(SAMPLES_PER_PACKET * 4, sizeof(unsigned char));
-  size_t i2s_bytes_read = 0;
 
   // UDP inits
-  esp_err_t send_res;
   char addr_str[128];
   int addr_family;
   int ip_protocol;
 
-  RTP_header rtp_header = create_aes67_header(L24);
-  uint32_t mic24_value = 0;
+  /* Initialize packet headers */
 
-  /* Initialize first packet header */
-  packet_data[0] = rtp_header.a;
-  packet_data[1] = rtp_header.b;
-  packet_data[2] = rtp_header.c;
-  packet_data[3] = rtp_header.d;
-  packet_data[4] = rtp_header.e;
-  packet_data[5] = rtp_header.f;
-  packet_data[6] = rtp_header.g;
-  packet_data[7] = rtp_header.h;
-  packet_data[8] = rtp_header.i;
-  packet_data[9] = rtp_header.j;
-  packet_data[10] = rtp_header.k;
-  packet_data[11] = rtp_header.l;
+  for (size_t i = 0; i < RINGBUFFER_SIZE; i++)
+  {
+    packet_data_buffer[i][0] = rtp_header.a;
+    packet_data_buffer[i][1] = rtp_header.b;
+    packet_data_buffer[i][2] = rtp_header.c;
+    packet_data_buffer[i][3] = rtp_header.d;
+    packet_data_buffer[i][4] = rtp_header.e;
+    packet_data_buffer[i][5] = rtp_header.f;
+    packet_data_buffer[i][6] = rtp_header.g;
+    packet_data_buffer[i][7] = rtp_header.h;
+    packet_data_buffer[i][8] = rtp_header.i;
+    packet_data_buffer[i][9] = rtp_header.j;
+    packet_data_buffer[i][10] = rtp_header.k;
+    packet_data_buffer[i][11] = rtp_header.l;
+  }
 
 #ifdef CONFIG_OPPONENT_IS_IPV4
   struct sockaddr_in destAddr;
@@ -297,47 +395,44 @@ void app_main(void)
   }
   ESP_LOGI(TAG, "Socket created");
 
-  for (;;)
+  WriteToRingbufferTaskParams w_params = {
+      .dma_readout = dma_readout,
+      .rtp_header = &rtp_header,
+      .packet_data_buffer = packet_data_buffer,
+  };
+
+  ReadRingbufferAndSendPacketTaskParams r_params = {
+      .packet_data_buffer = packet_data_buffer,
+      .sock = sock,
+      .destAddr = &destAddr,
+      .destAddrSize = sizeof(destAddr),
+  };
+
+  xTaskCreatePinnedToCore(
+      writeToRingbufferTask, /* Function to implement the task */
+      "writeToRingbuffer",   /* Name of the task */
+      10000,                 /* Stack size in words */
+      &w_params,             /* Task input parameter */
+      100,                   /* Priority of the task */
+      NULL,                  /* Task handle. */
+      READ_CORE              /* Core where the task should run */
+  );
+
+  xTaskCreatePinnedToCore(
+      readRingbufferAndSendPacketTask, /* Function to implement the task */
+      "sendPacket",                    /* Name of the task */
+      10000,                           /* Stack size in words */
+      &r_params,                       /* Task input parameter */
+      100,                             /* Priority of the task */
+      NULL,                            /* Task handle. */
+      SEND_CORE                        /* Core where the task should run */
+  );
+
+  ESP_LOGI(TAG, "Task created...");
+
+  while (true)
   {
-    i2s_read(I2S_NUM, dma_readout, (SAMPLES_PER_PACKET * 4), &i2s_bytes_read, portMAX_DELAY);
-
-    renew_aes67_header(&rtp_header);
-
-    /* rewrite packet_data */
-    // packet_data[0] = rtp_header.a;
-    // packet_data[1] = rtp_header.b;
-    packet_data[2] = rtp_header.c; // change only the sequence numbers
-    packet_data[3] = rtp_header.d;
-    packet_data[4] = rtp_header.e; // and the timestamps
-    packet_data[5] = rtp_header.f;
-    packet_data[6] = rtp_header.g;
-    packet_data[7] = rtp_header.h;
-    // packet_data[8] = rtp_header.i;
-    // packet_data[9] = rtp_header.j;
-    // packet_data[10] = rtp_header.k;
-    // packet_data[11] = rtp_header.l;
-    //
-    int base_i;
-    const unsigned int offset = RTP_HEADER_BYTES;
-    for (int i = 0; i < SAMPLES_PER_PACKET; i++)
-    {
-      mic24_value = (((dma_readout[i * 4 + 3] & 0xff) << 17) |
-                     ((dma_readout[i * 4 + 2] & 0xff) << 9) |
-                     ((dma_readout[i * 4 + 1] & 0xff) << 1) |
-                     ((dma_readout[i * 4 + 0] & 0xff) >> 7)) &
-                    0x00ffffff;
-
-      packet_data[offset + i * 3 + 0] = (mic24_value >> 16) & 0xff;
-      packet_data[offset + i * 3 + 1] = (mic24_value >> 8) & 0xff;
-      packet_data[offset + i * 3 + 2] = (mic24_value >> 0) & 0xff;
-    }
-
-    send_res = sendto(
-        sock,
-        packet_data,
-        PACKET_DATA_LENGTH,
-        0,
-        (struct sockaddr *)&destAddr,
-        sizeof(destAddr));
   }
+
+  // readRingbufferAndSendPacketTask(&r_params);
 }
