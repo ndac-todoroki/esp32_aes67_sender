@@ -39,23 +39,28 @@ i2s_pin_config_t pin_config = {
 ```
 
 connect the corresponding pins on the I2S device to the pin you set above.
-This settings may be changeable via `make menuconfig` someday.
+This settings may be changeable via `idf.py menuconfig` someday.
 
 ### Software Setup
 
-1. Make sure you have ESP-IDF correctly installed, and is useable in your shell's path.
-1. Edit `main/CMakeLists.txt`'s `COMPONENT_SRCS` to set which source C file to use. (e.g. `'main/ADMP441/main-dualcore.c'`)
+1. Make sure you have ESP-IDF correctly installed, and is useable in your shell's path. Install the latest version (or at least v3.1).  
+   Install Ninja if you can, the compile process will be faster.
+1. Do `cp main/config/cmake_config.sample.txt main/config/cmake_config.txt`
+1. Edit `main/config/cmake_config.txt`'s `set(MainFile "{filename}")` to set which source C file to use. (e.g. `'main/ADMP441/main-dualcore.c'`, filename should be the relative path from the project root)
 1. Do `$ cp sdkconfig.sample sdkconfig` to copy recommended configs.
-1. Run `make menuconfig`. Under `Project Configuration`, set your Wi-Fi AP, and the receiver's address and the port to send the UDP packets.
-1. Run `make -j4 flash monitor` to flash and monitor. This compiles the sources too.
-1. (Run `make monitor` if you don't need to flash.)
+1. Run `idf.py menuconfig`. Under `Project Configuration`, set your Wi-Fi AP, and the receiver's address and the port to send the UDP packets.
+1. Run `idf.py -p /dev/ttyUSB0 flash monitor` to flash and monitor. This compiles the sources too.
+1. (Run `idf.py -p /dev/ttyUSB0 monitor` if you don't need to flash.)
 
-If an error occurs during compilation, check if you have ESP-IDF correctly installed, or, check `make menuconfig` (or the `sdkconfig` file directly) and see for example if your Serial port is configured correctly.
+If an error occurs during compilation, check if you have ESP-IDF correctly installed, or, check `idf.py menuconfig` (or the `sdkconfig` file directly) and see for example if your Serial port is configured correctly.
 
 ## Links
 - The old one (which acheived only over 2ms)  
   https://github.com/sfc-arch/esp32_aes67_sender
-- The receiver (this becomes a AP itself too), not working well
+- ~~The receiver (this becomes a AP itself too), not working well~~
   https://github.com/sfc-arch/esp32_aes67_receiver
 - The receiver for PCs
-  https://github.com/ndac-todoroki/PacketJyushinMaru
+  - The new one (written in Rust, better sound, can be run as binary)
+    https://github.com/ndac-todoroki/rtp_jyushin_maru
+  - The old one (Elixir, you need Elixir installed to run)
+    https://github.com/ndac-todoroki/PacketJyushinMaru

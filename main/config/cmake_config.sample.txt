@@ -1,0 +1,5 @@
+## Sample config file.
+## Copy this, modify, and rename it to `cmake_config.txt`.
+
+# Set the main file to be compiled, to `MainFilePath`.
+set(MainFile "./main.c")
