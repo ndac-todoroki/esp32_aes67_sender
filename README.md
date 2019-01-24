@@ -57,10 +57,10 @@ If an error occurs during compilation, check if you have ESP-IDF correctly insta
 ## Links
 - The old one (which acheived only over 2ms)  
   https://github.com/sfc-arch/esp32_aes67_sender
-- ~~The receiver (this becomes a AP itself too), not working well~~
-  https://github.com/sfc-arch/esp32_aes67_receiver
+- ~~The receiver (this becomes a AP itself too), not working well~~  
+  ~~https://github.com/sfc-arch/esp32_aes67_receiver~~
 - The receiver for PCs
-  - The new one (written in Rust, better sound, can be run as binary)
+  - The new one (written in Rust, better sound, can be run as binary)  
     https://github.com/ndac-todoroki/rtp_jyushin_maru
-  - The old one (Elixir, you need Elixir installed to run)
+  - The old one (Elixir, you need Elixir installed to run, audio drops but latency is lower)  
     https://github.com/ndac-todoroki/PacketJyushinMaru
